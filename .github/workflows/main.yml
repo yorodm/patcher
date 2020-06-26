@@ -1,0 +1,21 @@
+on:
+  push:
+    tags:
+      - '*'
+
+name: Build
+jobs:
+  build_and_test:
+    name: Rust project
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --release --all-features
+      - name: upload binaty
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "target/release/patcher"
+          token: ${{ secrets.GITHUB_TOKEN }}
