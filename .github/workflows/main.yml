@@ -14,8 +14,8 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --release --all-features
-      - name: Create a Release APK
+      - name: upload binaty
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "target/release/*"
+          artifacts: "target/release/patcher"
           token: ${{ secrets.GITHUB_TOKEN }}
