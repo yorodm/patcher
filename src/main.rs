@@ -1,9 +1,6 @@
-use futures::future::TryFutureExt;
-use futures::stream::{self, StreamExt, TryStreamExt};
-use hyper::server::conn::AddrStream;
+use futures::stream::TryStreamExt;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Result, Server, StatusCode};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::signal::ctrl_c;
@@ -12,6 +9,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 type Producer<T> = Arc<Mutex<Sender<T>>>;
 type Consumer<T> = Arc<Mutex<Receiver<T>>>;
+
 
 struct Stream {
     body: Vec<u8>,
@@ -50,20 +48,17 @@ async fn serve_request(
         (&Method::POST, "/") => *response.status_mut() = StatusCode::BAD_REQUEST,
         (&Method::GET, x) => {
             let resp: Vec<&str> = x.split("/").skip(1).collect();
-            println!("Llamando al get");
             if resp.len() != 1 {
                 *response.status_mut() = StatusCode::BAD_REQUEST;
                 *response.body_mut() = Body::from(format!("{:?}", resp));
             } else {
                 let channels = channels.clone();
-                println!("Antes del lock");
                 let hash = channels.read().await;
-                println!("Despues del lock");
                 match hash.get(resp[0]) {
                     Some(chan) => {
-                        println!("Some hash get");
                         let rx = Arc::clone(&chan.rx);
                         let mut rx = rx.lock().await;
+						drop(hash);
                         let data = rx.recv().await;
                         match consume(data).await {
                             Some(x) => *response.body_mut() = Body::from(x),
@@ -71,7 +66,7 @@ async fn serve_request(
                         };
                     }
                     None => {
-                        println!("None hash get");
+						drop(hash);
                         let s = resp[0];
                         let chan = Channel::new();
                         let rx = Arc::clone(&chan.rx);
@@ -94,11 +89,11 @@ async fn serve_request(
                 *response.status_mut() = StatusCode::BAD_REQUEST;
                 *response.body_mut() = Body::from(format!("{:?}", resp));
             } else {
-                let mut hash = channels.read().await;
+                let hash = channels.read().await;
                 match hash.get(resp[0]) {
                     Some(chan) => {
-                        println!("Some hash post");
-                        let mut tx = chan.tx.lock().await;
+						let tx = Arc::clone(&chan.tx);
+                        let mut tx = tx.lock().await;
                         let data: Result<Vec<u8>> = req
                             .into_body()
                             .map_ok(|x| x)
@@ -117,7 +112,6 @@ async fn serve_request(
                         }
                     }
                     None => {
-                        println!("None hash post");
                     }
                 };
             }
@@ -152,7 +146,6 @@ async fn main() {
         async {
             Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
                 let channels = Arc::clone(&channels);
-                println!("Llamando a servicefn");
                 serve_request(req, channels)
             }))
         }
