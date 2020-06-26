@@ -1,0 +1,14 @@
+[package]
+name = "patcher"
+version = "0.1.0"
+authors = ["Yoandy Rodriguez Martinez <yoandy.rmartinez@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+hyper = "0.13"
+tokio = { version = "0.2", features = ["full"] }
+futures = "0.3"
+log = "0.4.8"
+stderrlog = "0.4.3"
+gumdrop = "0.8.0"
+futures-util = "0.3.5"
