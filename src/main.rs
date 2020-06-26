@@ -6,10 +6,12 @@ use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::{Mutex, Notify, RwLock};
-
+use gumdrop::Options;
+use std::net::IpAddr;
+use stderrlog;
+use log::{info, error};
 type Producer<T> = Arc<Mutex<Sender<T>>>;
 type Consumer<T> = Arc<Mutex<Receiver<T>>>;
-
 
 struct Stream {
     body: Vec<u8>,
@@ -58,7 +60,7 @@ async fn serve_request(
                     Some(chan) => {
                         let rx = Arc::clone(&chan.rx);
                         let mut rx = rx.lock().await;
-						drop(hash);
+                        drop(hash);
                         let data = rx.recv().await;
                         match consume(data).await {
                             Some(x) => *response.body_mut() = Body::from(x),
@@ -66,7 +68,7 @@ async fn serve_request(
                         };
                     }
                     None => {
-						drop(hash);
+                        drop(hash);
                         let s = resp[0];
                         let chan = Channel::new();
                         let rx = Arc::clone(&chan.rx);
@@ -92,7 +94,8 @@ async fn serve_request(
                 let hash = channels.read().await;
                 match hash.get(resp[0]) {
                     Some(chan) => {
-						let tx = Arc::clone(&chan.tx);
+                        let tx = Arc::clone(&chan.tx);
+                        drop(hash);
                         let mut tx = tx.lock().await;
                         let data: Result<Vec<u8>> = req
                             .into_body()
@@ -105,13 +108,55 @@ async fn serve_request(
                         match data {
                             Ok(v) => {
                                 let stream = Stream::new(v);
-                                //let rx = stream.consumer
-                                tx.send(stream).await;
+                                let notif = Arc::clone(&stream.notify);
+                                match tx.send(stream).await {
+                                    Ok(_) => {
+                                        notif.notified().await;
+                                    }
+                                    Err(_) => {
+                                        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                                    }
+                                };
                             }
-                            Err(_) => {}
+                            Err(_) => {
+                                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                            }
                         }
                     }
                     None => {
+                        drop(hash);
+                        let s = resp[0];
+                        let chan = Channel::new();
+                        let tx = Arc::clone(&chan.tx);
+                        let mut tx = tx.lock().await;
+                        let mut hash = channels.write().await;
+                        hash.insert(s.to_owned(), chan);
+                        drop(hash);
+                        let data: Result<Vec<u8>> = req
+                            .into_body()
+                            .map_ok(|x| x)
+                            .try_fold(Vec::new(), |mut vec, chunk| {
+                                vec.extend_from_slice(&chunk);
+                                async { Ok(vec) }
+                            })
+                            .await;
+                        match data {
+                            Ok(v) => {
+                                let stream = Stream::new(v);
+                                let notif = Arc::clone(&stream.notify);
+                                match tx.send(stream).await {
+                                    Ok(_) => {
+                                        notif.notified().await;
+                                    }
+                                    Err(_) => {
+                                        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                                    }
+                                };
+                            }
+                            Err(_) => {
+                                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                            }
+                        }
                     }
                 };
             }
@@ -128,7 +173,7 @@ struct Channel {
 
 impl Channel {
     fn new() -> Channel {
-        let (mut tx, mut rx) = channel::<Stream>(1);
+        let (tx, rx) = channel::<Stream>(1);
         Channel {
             tx: Arc::new(Mutex::new(tx)),
             rx: Arc::new(Mutex::new(rx)),
@@ -138,8 +183,28 @@ impl Channel {
 
 type ChannelMap = HashMap<String, Channel>;
 
+#[derive(Debug,Options)]
+struct Opts {
+	address: String,
+	port: u16,
+	help: bool
+}
 #[tokio::main]
 async fn main() {
+	stderrlog::new().module(module_path!())
+		.verbosity(5)
+		.init()
+    	.unwrap();
+	let opts = Opts::parse_args_default_or_exit();
+	println!("{:?}", opts);
+	let ip_addr:IpAddr = match opts.address.parse() {
+		Ok(x) => x,
+		_ => [127,0,0,1].into()
+	};
+	let port = match opts.port {
+		0 => 8080,
+		x => x
+	};
     let channels = Arc::new(RwLock::new(ChannelMap::new()));
     let make_service = make_service_fn(|_| {
         let channels = Arc::clone(&channels);
@@ -150,8 +215,12 @@ async fn main() {
             }))
         }
     });
-    let addr = ([127, 0, 0, 1], 3000).into();
-    let server = Server::bind(&addr).serve(make_service);
+	let addr =(ip_addr,port).into();
+	info!("Server started at {}",addr);
+    let server = Server::bind(&addr)
+        .serve(make_service)
+        .with_graceful_shutdown(async { ctrl_c().await.expect("Error setting signal") });
+
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
