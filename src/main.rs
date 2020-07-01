@@ -142,7 +142,7 @@ async fn serve_request(
         (&Method::POST, "/") => {
             *response.status_mut() = StatusCode::BAD_REQUEST;
             Ok(response)
-        }
+        },
         (&Method::GET, x) => Ok(get_channel(channels, x).await),
         (&Method::POST, x) => {
 			let path = String::from(x);
@@ -155,6 +155,7 @@ async fn serve_request(
     }
 }
 
+#[derive(Debug)]
 struct Channel {
     tx: Producer<Stream>,
     rx: Consumer<Stream>,
@@ -214,4 +215,47 @@ async fn main() {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
+}
+
+#[cfg(test)]
+mod test {
+	use hyper::{Body, Method, Request, Response, Result, Server, StatusCode};
+	use super::*;
+	use tokio;
+	use std::io::Read;
+	use futures::TryStreamExt;
+
+	#[tokio::test]
+	async fn test_get_creates_channel(){
+		let channels = Arc::new(RwLock::new(ChannelMap::new()));
+		let  req = Request::new(Body::from("Hola mundo"));
+		let (get, _) = tokio::join!(
+			get_channel(Arc::clone(&channels), "/pepito"),
+			post_channel(req, Arc::clone(&channels), "/pepito")
+		);
+		let f = get.into_body().try_fold(Vec::new(),| mut acc, chunk| {
+			acc.extend_from_slice(&*chunk);
+			futures::future::ok::<_,hyper::Error>(acc)
+		}).await.unwrap();
+		let s = std::str::from_utf8(f.as_slice()).unwrap();
+		assert_eq!(s, "Hola mundo")
+	}
+
+	#[tokio::test]
+	async fn test_post_creates_channel(){
+		let channels = Arc::new(RwLock::new(ChannelMap::new()));
+		let mut req = Request::new(Body::from("Hola mundo"));
+		let (_, get) = tokio::join!(
+			post_channel(req, Arc::clone(&channels), "/pepito"),
+			get_channel(Arc::clone(&channels), "/pepito"),
+		);
+		let f = get.into_body().try_fold(Vec::new(),| mut acc, chunk| {
+			acc.extend_from_slice(&*chunk);
+			futures::future::ok::<_,hyper::Error>(acc)
+		}).await.unwrap();
+		let s = std::str::from_utf8(f.as_slice()).unwrap();
+		assert_eq!(s, "Hola mundo")
+	}
+
+
 }
