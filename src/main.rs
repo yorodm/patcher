@@ -1,7 +1,7 @@
 use gumdrop::Options;
+use hyper::body::{Buf, Bytes};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Result, Server, StatusCode};
-use hyper::body::{Buf, Bytes};
 use log::info;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -31,12 +31,60 @@ impl Stream {
 async fn consume(data: Option<Stream>) -> Option<Bytes> {
     match data {
         Some(stream) => {
-			let bytes = stream.body;
+            let bytes = stream.body;
             let notif = Arc::clone(&stream.notify);
             notif.notify();
             Some(bytes)
         }
         None => None,
+    }
+}
+
+async fn produce(data: Bytes, tx: Arc<Mutex<Sender<Stream>>>) -> Response<Body> {
+    let mut response = Response::new(Body::default());
+    let mut tx = tx.lock().await;
+    let stream = Stream::new(data);
+    let notif = Arc::clone(&stream.notify);
+    match tx.send(stream).await {
+        Ok(_) => {
+            notif.notified().await;
+        }
+        Err(_) => {
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    response
+}
+
+async fn handle_single(
+    channels: Arc<RwLock<ChannelMap>>,
+    resp: &[&str],
+    data: Bytes,
+) -> Result<Response<Body>> {
+    if resp.len() != 1 {
+        let mut response = Response::new(Body::default());
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        *response.body_mut() = Body::from(format!("{:?}", resp));
+        Ok(response)
+    } else {
+        let hash = channels.read().await;
+        match hash.get(resp[0]) {
+            Some(chan) => {
+                let tx = Arc::clone(&chan.tx);
+                drop(hash);
+                Ok(produce(data, tx).await)
+            }
+            None => {
+                drop(hash);
+                let mut hash = channels.write().await;
+                let s = resp[0];
+                let chan = Channel::new();
+                let tx = Arc::clone(&chan.tx);
+                hash.insert(s.to_owned(), chan);
+                drop(hash);
+                Ok(produce(data, tx).await)
+            }
+        }
     }
 }
 
@@ -80,22 +128,6 @@ async fn get_channel(channels: Arc<RwLock<ChannelMap>>, x: &str) -> Response<Bod
     response
 }
 
-async fn produce(data: Bytes, tx: Arc<Mutex<Sender<Stream>>>) -> Response<Body>{
-    let mut response = Response::new(Body::default());
-	let mut tx = tx.lock().await;
-    let stream = Stream::new(data);
-    let notif = Arc::clone(&stream.notify);
-    match tx.send(stream).await {
-        Ok(_) => {
-            notif.notified().await;
-        }
-        Err(_) => {
-            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
-    response
-}
-
 
 async fn post_channel(
     req: Request<Body>,
@@ -103,31 +135,16 @@ async fn post_channel(
     x: &str,
 ) -> Result<Response<Body>> {
     let resp: Vec<&str> = x.split("/").skip(1).collect();
-	let mut whole_body = hyper::body::aggregate(req).await?;
-	let data = whole_body.to_bytes();
-    if resp.len() != 1 {
-        let mut response = Response::new(Body::default());
-        *response.status_mut() = StatusCode::BAD_REQUEST;
-        *response.body_mut() = Body::from(format!("{:?}", resp));
-        Ok(response)
-    } else {
-        let hash = channels.read().await;
-        match hash.get(resp[0]) {
-            Some(chan) => {
-                let tx = Arc::clone(&chan.tx);
-                drop(hash);
-                Ok(produce(data, tx).await)
-            }
-            None => {
-                drop(hash);
-                let s = resp[0];
-                let chan = Channel::new();
-                let tx = Arc::clone(&chan.tx);
-                let mut hash = channels.write().await;
-                hash.insert(s.to_owned(), chan);
-                drop(hash);
-                Ok(produce(data, tx).await)
-            }
+    let mut whole_body = hyper::body::aggregate(req).await?;
+    let data = whole_body.to_bytes();
+    let first = resp[0];
+    match first {
+        "pubsub" => {
+            todo!()
+        }
+        _ => {
+            let channels = Arc::clone(&channels);
+            handle_single(channels, &resp, data).await
         }
     }
 }
@@ -142,10 +159,10 @@ async fn serve_request(
         (&Method::POST, "/") => {
             *response.status_mut() = StatusCode::BAD_REQUEST;
             Ok(response)
-        },
+        }
         (&Method::GET, x) => Ok(get_channel(channels, x).await),
         (&Method::POST, x) => {
-			let path = String::from(x);
+            let path = String::from(x);
             post_channel(req, channels, &path).await
         }
         _ => {
@@ -219,43 +236,81 @@ async fn main() {
 
 #[cfg(test)]
 mod test {
-	use hyper::{Body, Method, Request, Response, Result, Server, StatusCode};
-	use super::*;
-	use tokio;
-	use std::io::Read;
-	use futures::TryStreamExt;
+    use super::*;
+    use futures::TryStreamExt;
+    use hyper::{Body, Request};
+    use tokio;
 
-	#[tokio::test]
-	async fn test_get_creates_channel(){
-		let channels = Arc::new(RwLock::new(ChannelMap::new()));
-		let  req = Request::new(Body::from("Hola mundo"));
-		let (get, _) = tokio::join!(
-			get_channel(Arc::clone(&channels), "/pepito"),
-			post_channel(req, Arc::clone(&channels), "/pepito")
-		);
-		let f = get.into_body().try_fold(Vec::new(),| mut acc, chunk| {
-			acc.extend_from_slice(&*chunk);
-			futures::future::ok::<_,hyper::Error>(acc)
-		}).await.unwrap();
-		let s = std::str::from_utf8(f.as_slice()).unwrap();
-		assert_eq!(s, "Hola mundo")
-	}
+    #[tokio::test]
+    async fn test_get_creates_channel() {
+        let channels = Arc::new(RwLock::new(ChannelMap::new()));
+        let req = Request::new(Body::from("Hola mundo"));
+        let (get, _) = tokio::join!(
+            get_channel(Arc::clone(&channels), "/pepito"),
+            post_channel(req, Arc::clone(&channels), "/pepito")
+        );
+        let f = get
+            .into_body()
+            .try_fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                futures::future::ok::<_, hyper::Error>(acc)
+            })
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(f.as_slice()).unwrap();
+        assert_eq!(s, "Hola mundo")
+    }
 
-	#[tokio::test]
-	async fn test_post_creates_channel(){
-		let channels = Arc::new(RwLock::new(ChannelMap::new()));
-		let mut req = Request::new(Body::from("Hola mundo"));
-		let (_, get) = tokio::join!(
-			post_channel(req, Arc::clone(&channels), "/pepito"),
-			get_channel(Arc::clone(&channels), "/pepito"),
-		);
-		let f = get.into_body().try_fold(Vec::new(),| mut acc, chunk| {
-			acc.extend_from_slice(&*chunk);
-			futures::future::ok::<_,hyper::Error>(acc)
-		}).await.unwrap();
-		let s = std::str::from_utf8(f.as_slice()).unwrap();
-		assert_eq!(s, "Hola mundo")
-	}
+    #[tokio::test]
+    async fn test_multiple_get_creates_channel() {
+        let channels = Arc::new(RwLock::new(ChannelMap::new()));
+        let req = Request::new(Body::from("Hola mundo"));
+        let req1 = Request::new(Body::from("Hola mundo"));
+        let (get1, _, get2, _) = tokio::join!(
+            get_channel(Arc::clone(&channels), "/pepito"),
+            post_channel(req1, Arc::clone(&channels), "/pepito"),
+            get_channel(Arc::clone(&channels), "/cuquito"),
+            post_channel(req, Arc::clone(&channels), "/cuquito")
+        );
+        let f1 = get1
+            .into_body()
+            .try_fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                futures::future::ok::<_, hyper::Error>(acc)
+            })
+            .await
+            .unwrap();
+        let s1 = std::str::from_utf8(f1.as_slice()).unwrap();
+        let f2 = get2
+            .into_body()
+            .try_fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                futures::future::ok::<_, hyper::Error>(acc)
+            })
+            .await
+            .unwrap();
+        let s2 = std::str::from_utf8(f2.as_slice()).unwrap();
+        assert_eq!(s1, "Hola mundo");
+        assert_eq!(s2, "Hola mundo")
+    }
 
-
+    #[tokio::test]
+    async fn test_post_creates_channel() {
+        let channels = Arc::new(RwLock::new(ChannelMap::new()));
+        let req = Request::new(Body::from("Hola mundo"));
+        let (_, get) = tokio::join!(
+            post_channel(req, Arc::clone(&channels), "/pepito"),
+            get_channel(Arc::clone(&channels), "/pepito"),
+        );
+        let f = get
+            .into_body()
+            .try_fold(Vec::new(), |mut acc, chunk| {
+                acc.extend_from_slice(&*chunk);
+                futures::future::ok::<_, hyper::Error>(acc)
+            })
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(f.as_slice()).unwrap();
+        assert_eq!(s, "Hola mundo")
+    }
 }
