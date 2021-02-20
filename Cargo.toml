@@ -10,8 +10,6 @@ keywords = ["utils"]
 readme = "README.md"
 homepage = "https://github.com/yorodm/patcher"
 repository = "https://github.com/yorodm/patcher"
-[badges]
-travis-ci = { repository = "yorodm/patcher", branch = "master" }
 [dependencies]
 hyper = "0.13"
 tokio = { version = "0.2", features = ["full"] }
