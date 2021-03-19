@@ -128,7 +128,6 @@ async fn get_channel(channels: Arc<RwLock<ChannelMap>>, x: &str) -> Response<Bod
     response
 }
 
-
 async fn post_channel(
     req: Request<Body>,
     channels: Arc<RwLock<ChannelMap>>,
@@ -204,13 +203,15 @@ async fn main() {
         .init()
         .unwrap();
     let opts = Opts::parse_args_default_or_exit();
-    println!("{:?}", opts);
     let ip_addr: IpAddr = match opts.address.parse() {
         Ok(x) => x,
         _ => [127, 0, 0, 1].into(),
     };
     let port = match opts.port {
-        0 => 8080,
+        0 => std::env::var("PORT")
+            .unwrap()
+            .parse()
+            .expect("Heroku should provide the PORT environment variable"),
         x => x,
     };
     let channels = Arc::new(RwLock::new(ChannelMap::new()));
