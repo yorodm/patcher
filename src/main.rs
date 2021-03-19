@@ -2,7 +2,7 @@ use gumdrop::Options;
 use hyper::body::{Buf, Bytes};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Result, Server, StatusCode};
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -70,6 +70,7 @@ async fn handle_single(
         let hash = channels.read().await;
         match hash.get(resp[0]) {
             Some(chan) => {
+				info!("Producing data to channel {}", resp[0]);
                 let tx = Arc::clone(&chan.tx);
                 drop(hash);
                 Ok(produce(data, tx).await)
@@ -78,6 +79,7 @@ async fn handle_single(
                 drop(hash);
                 let mut hash = channels.write().await;
                 let s = resp[0];
+				info!("Creating consumer for channel {}", resp[0]);
                 let chan = Channel::new();
                 let tx = Arc::clone(&chan.tx);
                 hash.insert(s.to_owned(), chan);
@@ -92,6 +94,7 @@ async fn get_channel(channels: Arc<RwLock<ChannelMap>>, x: &str) -> Response<Bod
     let mut response = Response::new(Body::default());
     let resp: Vec<&str> = x.split("/").skip(1).collect();
     if resp.len() != 1 {
+        warn!("To many segments in request {}", x);
         *response.status_mut() = StatusCode::BAD_REQUEST;
         *response.body_mut() = Body::from(format!("{:?}", resp));
     } else {
@@ -99,6 +102,7 @@ async fn get_channel(channels: Arc<RwLock<ChannelMap>>, x: &str) -> Response<Bod
         let hash = channels.read().await;
         match hash.get(resp[0]) {
             Some(chan) => {
+                info!("Consuming channel {}", resp[0]);
                 let rx = Arc::clone(&chan.rx);
                 let mut rx = rx.lock().await;
                 drop(hash);
@@ -111,6 +115,7 @@ async fn get_channel(channels: Arc<RwLock<ChannelMap>>, x: &str) -> Response<Bod
             None => {
                 drop(hash);
                 let s = resp[0];
+                info!("Creating new consumer for channel {}", s);
                 let chan = Channel::new();
                 let rx = Arc::clone(&chan.rx);
                 let mut rx = rx.lock().await;
@@ -139,7 +144,11 @@ async fn post_channel(
     let first = resp[0];
     match first {
         "pubsub" => {
-            todo!()
+            let mut response = Response::new(Body::default());
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            *response.body_mut() = Body::from(format!("{:?}", resp));
+            warn!("Requesting pubsub channel!");
+            Ok(response)
         }
         _ => {
             let channels = Arc::clone(&channels);
@@ -154,8 +163,12 @@ async fn serve_request(
 ) -> Result<Response<Body>> {
     let mut response = Response::new(Body::empty());
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => Ok::<_, hyper::Error>(response),
+        (&Method::GET, "/") => {
+            warn!("GET request for / context");
+            Ok::<_, hyper::Error>(response)
+        }
         (&Method::POST, "/") => {
+            warn!("POST request for / context");
             *response.status_mut() = StatusCode::BAD_REQUEST;
             Ok(response)
         }
@@ -205,7 +218,7 @@ async fn main() {
     let opts = Opts::parse_args_default_or_exit();
     let ip_addr: IpAddr = match opts.address.parse() {
         Ok(x) => x,
-        _ => [127, 0, 0, 1].into(),
+        _ => [0, 0, 0, 0].into(),
     };
     let port = match opts.port {
         0 => std::env::var("PORT")
