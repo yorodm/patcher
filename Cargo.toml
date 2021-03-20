@@ -1,6 +1,6 @@
 [package]
 name = "patcher"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Yoandy Rodriguez Martinez <yoandy.rmartinez@gmail.com>"]
 edition = "2018"
 license = "MIT"
